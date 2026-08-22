@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
@@ -27,16 +28,24 @@ HERE = Path(__file__).resolve().parent
 MAX_CONCURRENT = int(os.environ.get("TRACTOR_BEAM_JOBS", "3"))
 
 
+WINDOWS = sys.platform == "win32"
+
+
 def default_output_dir() -> Path:
-    """Land files outside the WSL VHDX by default so the virtual disk never swells."""
+    """Land files outside the WSL VHDX by default so the virtual disk never swells.
+
+    Running natively there is nothing to escape, and Path.home() is already the
+    Windows profile, so the plain fallback is the right answer.
+    """
     if env := os.environ.get("TRACTOR_BEAM_OUT"):
         return Path(env)
-    skip = {"public", "default", "default user", "all users"}
-    for downloads in sorted(Path("/mnt/c/Users").glob("*/Downloads")):
-        if downloads.parent.name.lower() in skip:
-            continue
-        if downloads.is_dir() and os.access(downloads, os.W_OK):
-            return downloads / "tractor_beam"
+    if not WINDOWS:
+        skip = {"public", "default", "default user", "all users"}
+        for downloads in sorted(Path("/mnt/c/Users").glob("*/Downloads")):
+            if downloads.parent.name.lower() in skip:
+                continue
+            if downloads.is_dir() and os.access(downloads, os.W_OK):
+                return downloads / "tractor_beam"
     return Path.home() / "Downloads" / "tractor_beam"
 
 
@@ -46,6 +55,8 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 def find_file_manager() -> str | None:
     """Whichever file manager this host offers. explorer.exe first: under WSL both exist."""
+    if WINDOWS:
+        return "explorer.exe"
     for cmd in ("explorer.exe", "xdg-open", "open"):
         if shutil.which(cmd):
             return cmd
@@ -62,11 +73,32 @@ def has_cookie_db(browser: str, profile: Path) -> bool:
     return any((profile / rel).is_file() for rel in ("Default/Cookies", "Default/Network/Cookies"))
 
 
-def find_cookie_sources() -> dict[str, dict]:
-    """Browser profiles this host can read. Under WSL the Windows ones show up through /mnt/c.
+def windows_cookie_sources() -> list[tuple[str, str, str]]:
+    """Running natively, DPAPI unseals normally, so the chromium family is usable too."""
+    found: list[tuple[str, str, str]] = []
+    appdata = Path(os.environ.get("APPDATA", ""))
+    local = Path(os.environ.get("LOCALAPPDATA", ""))
 
-    Chromium-family profiles on the Windows side are deliberately left out: their
-    cookies are sealed with DPAPI, which cannot be unlocked from inside WSL.
+    for prof in sorted((appdata / "Mozilla/Firefox/Profiles").glob("*.default*")):
+        if has_cookie_db("firefox", prof):
+            found.append(("firefox", f"Firefox · {prof.name.split('.', 1)[-1]}", str(prof)))
+
+    for browser, base, rel in (("chrome", local, "Google/Chrome/User Data"),
+                               ("edge", local, "Microsoft/Edge/User Data"),
+                               ("brave", local, "BraveSoftware/Brave-Browser/User Data"),
+                               ("vivaldi", local, "Vivaldi/User Data"),
+                               ("chromium", local, "Chromium/User Data"),
+                               ("opera", appdata, "Opera Software/Opera Stable")):
+        if has_cookie_db(browser, d := base / rel):
+            found.append((browser, browser.capitalize(), str(d)))
+    return found
+
+
+def posix_cookie_sources() -> list[tuple[str, str, str]]:
+    """Under WSL the Windows profiles show up through /mnt/c.
+
+    Chromium-family profiles on the Windows side are deliberately left out there:
+    their cookies are sealed with DPAPI, which cannot be unlocked from inside WSL.
     """
     found: list[tuple[str, str, str]] = []
 
@@ -89,7 +121,12 @@ def find_cookie_sources() -> dict[str, dict]:
                          ("opera", ".config/opera")):
         if (d := Path.home() / rel).is_dir() and has_cookie_db(browser, d):
             found.append((browser, browser.capitalize(), str(d)))
+    return found
 
+
+def find_cookie_sources() -> dict[str, dict]:
+    """Browser profiles this host can read, whichever platform it is."""
+    found = windows_cookie_sources() if WINDOWS else posix_cookie_sources()
     return {
         f"{browser}-{i}": {"browser": browser, "label": label, "profile": profile}
         for i, (browser, label, profile) in enumerate(found)
@@ -97,6 +134,7 @@ def find_cookie_sources() -> dict[str, dict]:
 
 
 COOKIE_SOURCES = find_cookie_sources()
+FFMPEG = shutil.which(os.environ.get("TRACTOR_BEAM_FFMPEG") or "ffmpeg")
 
 # Cloudflare turns away yt-dlp's stock TLS fingerprint with a 403. curl_cffi makes
 # the generic extractor's requests look like a real browser's instead.
@@ -113,13 +151,25 @@ def cookie_opts(key: str) -> dict:
 
 def open_in_file_manager(path: Path) -> None:
     """Pop the host's file browser open on `path`, selecting it when it is a file."""
+    if WINDOWS:
+        # Passing one raw command line skips subprocess's own quoting, so the quotes
+        # land where Explorer wants them and /select genuinely selects — the thing
+        # WSL cannot do, because its interop layer quotes the argument first.
+        target = path if path.exists() else OUT_DIR
+        switch = f'/select,"{target}"' if target.is_file() else f'"{target}"'
+        subprocess.Popen(f"explorer.exe {switch}")
+        return
     if FILE_MANAGER == "explorer.exe":
+        # Explorer's "/select,<file>" switch dies as soon as WSL quotes the argument
+        # for a path containing spaces, and it silently opens Documents instead. So
+        # open the containing folder, which survives quoting.
+        target = path if path.is_dir() else path.parent
         win = subprocess.run(
-            ["wslpath", "-w", str(path)], capture_output=True, text=True, check=False
+            ["wslpath", "-w", str(target)], capture_output=True, text=True, check=False
         ).stdout.strip()
         if not win:
             return
-        args = ["explorer.exe", f"/select,{win}"] if path.is_file() else ["explorer.exe", win]
+        args = ["explorer.exe", win]
     elif FILE_MANAGER == "open":
         args = ["open", "-R", str(path)] if path.is_file() else ["open", str(path)]
     else:
@@ -227,7 +277,7 @@ def build_opts(job: Job, quality: str, audio_format: str, cookies: str = "") -> 
         "no_warnings": True,
         "noprogress": True,
         "noplaylist": True,
-        "windowsfilenames": True,      # output usually lands on NTFS via /mnt/c
+        "windowsfilenames": True,      # output lands on NTFS either way
         "concurrent_fragment_downloads": 4,
         "retries": 10,
         "fragment_retries": 10,
@@ -235,6 +285,7 @@ def build_opts(job: Job, quality: str, audio_format: str, cookies: str = "") -> 
         "overwrites": False,
         "postprocessors": [],
         "extractor_args": IMPERSONATE_ARGS,
+        **({"ffmpeg_location": FFMPEG} if FFMPEG else {}),
         **cookie_opts(cookies),
     }
 
@@ -356,6 +407,7 @@ async def config() -> dict:
         "output_dir": str(OUT_DIR),
         "yt_dlp": yt_dlp.version.__version__,
         "can_reveal": FILE_MANAGER is not None,
+        "ffmpeg": bool(FFMPEG),
         "browsers": [{"id": k, "label": v["label"]} for k, v in COOKIE_SOURCES.items()],
     }
 

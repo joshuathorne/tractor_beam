@@ -11,6 +11,19 @@ Fetch remote video or audio via url. `yt-dlp` extracts,
 ./run.sh --lan 9000   # custom port
 ```
 
+Natively on Windows, same arguments:
+
+```bat
+run.cmd
+run.cmd --lan
+run.cmd --lan 9000
+```
+
+Both launchers build `.venv` on first run. Windows additionally needs `ffmpeg.exe`
+on PATH (`winget install Gyan.FFmpeg`) — the page warns if it is missing. Running
+natively is worth it for large files: downloads no longer cross WSL's `/mnt/c`
+bridge, and Chrome/Edge cookies become readable because DPAPI unseals normally.
+
 ## Output
 
 Files download to (`.../Downloads/tractor_beam`).
