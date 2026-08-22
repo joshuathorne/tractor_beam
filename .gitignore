@@ -1,0 +1,31 @@
+# Virtualenv — never commit this. It carries third-party source whose own
+# hardcoded API constants trip GitHub's secret scanner, and it is rebuildable
+# from requirements.txt in one command.
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Runtime output
+downloads/
+*.part
+*.ytdl
+*.mp4
+*.mkv
+*.webm
+*.m4a
+*.mp3
+*.opus
+*.flac
+*.wav
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>media-grab</title>
+<style>
+  :root {
+    --bg:#0e1116; --panel:#161b22; --panel-2:#1c232d; --line:#2b3441;
+    --fg:#e6edf3; --dim:#8b949e; --accent:#4a9eff; --ok:#3fb950;
+    --warn:#d29922; --err:#f85149; --radius:10px;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; background:var(--bg); color:var(--fg);
+    font:15px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    padding:28px 18px 60px;
+  }
+  main { max-width:820px; margin:0 auto; }
+  h1 { font-size:20px; margin:0 0 2px; letter-spacing:-.01em; }
+  h1 span { color:var(--accent); }
+  .sub { color:var(--dim); font-size:13px; margin-bottom:22px; }
+  .sub code { background:var(--panel-2); padding:1px 6px; border-radius:5px; font-size:12px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); padding:16px; margin-bottom:16px; }
+  .row { display:flex; gap:9px; }
+  input[type=url], select {
+    background:var(--panel-2); color:var(--fg); border:1px solid var(--line);
+    border-radius:8px; padding:11px 12px; font:inherit; outline:none;
+  }
+  input[type=url] { flex:1; min-width:0; }
+  input[type=url]:focus, select:focus { border-color:var(--accent); }
+  button {
+    background:var(--accent); color:#07121f; border:0; border-radius:8px;
+    padding:11px 18px; font:600 15px/1 inherit; cursor:pointer; white-space:nowrap;
+  }
+  button:hover:not(:disabled) { filter:brightness(1.12); }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  button.ghost { background:transparent; color:var(--dim); border:1px solid var(--line); font-weight:500; }
+  button.ghost:hover:not(:disabled) { color:var(--fg); border-color:var(--dim); filter:none; }
+  button.tiny { padding:5px 11px; font-size:12.5px; }
+  .meta { display:flex; gap:14px; margin-top:15px; padding-top:15px; border-top:1px solid var(--line); }
+  .meta img { width:132px; aspect-ratio:16/9; object-fit:cover; border-radius:7px; background:var(--panel-2); flex:none; }
+  .meta h2 { font-size:15px; margin:0 0 5px; line-height:1.35; }
+  .meta p { margin:0; color:var(--dim); font-size:13px; }
+  .opts { display:flex; flex-wrap:wrap; gap:9px; align-items:center; margin-top:15px; }
+  .seg { display:inline-flex; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:3px; }
+  .seg button {
+    background:transparent; color:var(--dim); font-weight:500; padding:7px 15px;
+    border-radius:6px; font-size:14px;
+  }
+  .seg button[aria-pressed="true"] { background:var(--accent); color:#07121f; font-weight:600; }
+  .spacer { flex:1; }
+  .job { background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); padding:13px 15px; margin-bottom:10px; }
+  .job-top { display:flex; align-items:center; gap:10px; margin-bottom:9px; }
+  .job-title { flex:1; min-width:0; font-size:14px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .tag { font-size:11px; font-weight:600; padding:3px 8px; border-radius:5px; background:var(--panel-2); color:var(--dim); flex:none; letter-spacing:.03em; }
+  .tag.running   { background:#12283f; color:var(--accent); }
+  .tag.postprocess { background:#3a2d0c; color:var(--warn); }
+  .tag.done      { background:#132b18; color:var(--ok); }
+  .tag.error     { background:#3a1618; color:var(--err); }
+  .tag.cancelled { background:var(--panel-2); color:var(--dim); }
+  .bar { height:5px; background:var(--panel-2); border-radius:3px; overflow:hidden; }
+  .bar div { height:100%; background:var(--accent); border-radius:3px; transition:width .3s ease; }
+  .bar.done div { background:var(--ok); }
+  .bar.error div { background:var(--err); }
+  .job-foot { display:flex; gap:12px; margin-top:8px; color:var(--dim); font-size:12.5px; align-items:center; flex-wrap:wrap; }
+  .job-foot .spacer { flex:1; }
+  .err { color:var(--err); font-size:12.5px; margin-top:8px; white-space:pre-wrap; word-break:break-word;
+         background:#1d1315; border:1px solid #3a1618; border-radius:6px; padding:8px 10px; }
+  a { color:var(--accent); }
+  .empty { color:var(--dim); font-size:13.5px; text-align:center; padding:26px 0; }
+  .jobs-head { display:flex; align-items:center; margin:24px 0 11px; }
+  .jobs-head h3 { font-size:13px; text-transform:uppercase; letter-spacing:.07em; color:var(--dim); margin:0; }
+  @media (max-width:560px) {
+    .row { flex-direction:column; }
+    .meta img { width:96px; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>media<span>-</span>grab</h1>
+  <p class="sub">Local downloader. Saves to <code id="outdir">…</code></p>
+
+  <div class="card">
+    <form class="row" id="form">
+      <input type="url" id="url" placeholder="Paste a video or audio URL…" autocomplete="off" required>
+      <button type="submit" id="inspect">Inspect</button>
+    </form>
+
+    <div class="meta" id="meta" hidden>
+      <img id="thumb" alt="">
+      <div style="min-width:0">
+        <h2 id="mtitle"></h2>
+        <p id="msub"></p>
+      </div>
+    </div>
+
+    <div class="opts" id="opts" hidden>
+      <div class="seg">
+        <button type="button" data-mode="video" aria-pressed="true">Video</button>
+        <button type="button" data-mode="audio" aria-pressed="false">Audio</button>
+      </div>
+      <select id="quality"></select>
+      <select id="afmt" hidden>
+        <option value="mp3">MP3 · V0</option>
+        <option value="m4a">M4A · no re-encode</option>
+        <option value="opus">Opus</option>
+        <option value="flac">FLAC</option>
+        <option value="wav">WAV</option>
+      </select>
+      <div class="spacer"></div>
+      <button type="button" id="grab">Download</button>
+    </div>
+
+    <div class="err" id="ierr" hidden></div>
+  </div>
+
+  <div class="jobs-head">
+    <h3>Queue</h3>
+    <div class="spacer"></div>
+    <button class="ghost tiny" id="clear">Clear finished</button>
+  </div>
+  <div id="jobs"><p class="empty">Nothing queued yet.</p></div>
+</main>
+
+<script>
+const $ = (s) => document.querySelector(s);
+let mode = "video", info = null;
+
+fetch("/api/config").then(r => r.json()).then(c => {
+  $("#outdir").textContent = c.output_dir;
+  document.title = "media-grab";
+});
+
+function dur(s) {
+  if (!s) return "";
+  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = Math.floor(s % 60);
+  return h ? `${h}:${String(m).padStart(2,"0")}:${String(x).padStart(2,"0")}`
+           : `${m}:${String(x).padStart(2,"0")}`;
+}
+
+function showErr(msg) {
+  const e = $("#ierr");
+  e.hidden = !msg;
+  e.textContent = msg || "";
+}
+
+$("#form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const url = $("#url").value.trim();
+  if (!url) return;
+  showErr("");
+  $("#inspect").disabled = true;
+  $("#inspect").textContent = "Reading…";
+  try {
+    const res = await fetch("/api/inspect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || data.detail?.[0]?.msg || "Could not read that URL");
+    info = data;
+    $("#mtitle").textContent = data.title || "(untitled)";
+    $("#msub").textContent = [data.uploader, dur(data.duration), data.extractor]
+      .filter(Boolean).join("  ·  ");
+    const t = $("#thumb");
+    if (data.thumbnail) { t.src = data.thumbnail; t.hidden = false; } else { t.hidden = true; }
+    const q = $("#quality");
+    q.innerHTML = '<option value="best">Best available</option>' +
+      (data.heights || []).map(h => `<option value="${h}">${h}p</option>`).join("");
+    $("#meta").hidden = false;
+    $("#opts").hidden = false;
+  } catch (e) {
+    showErr(e.message);
+    $("#meta").hidden = true;
+    $("#opts").hidden = true;
+  } finally {
+    $("#inspect").disabled = false;
+    $("#inspect").textContent = "Inspect";
+  }
+});
+
+document.querySelectorAll("[data-mode]").forEach(b => {
+  b.addEventListener("click", () => {
+    mode = b.dataset.mode;
+    document.querySelectorAll("[data-mode]").forEach(x =>
+      x.setAttribute("aria-pressed", String(x.dataset.mode === mode)));
+    $("#quality").hidden = mode !== "video";
+    $("#afmt").hidden = mode !== "audio";
+  });
+});
+
+$("#grab").addEventListener("click", async () => {
+  showErr("");
+  const body = {
+    url: $("#url").value.trim(),
+    mode,
+    quality: $("#quality").value || "best",
+    audio_format: $("#afmt").value
+  };
+  const res = await fetch("/api/grab", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) {
+    const d = await res.json().catch(() => ({}));
+    showErr(d.error || d.detail?.[0]?.msg || "Could not queue that download");
+  }
+});
+
+$("#clear").addEventListener("click", () => fetch("/api/clear", { method: "POST" }));
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
+}
+
+function render(jobs) {
+  const box = $("#jobs");
+  if (!jobs.length) { box.innerHTML = '<p class="empty">Nothing queued yet.</p>'; return; }
+  box.innerHTML = jobs.map(j => {
+    const live = j.status === "running" || j.status === "postprocess" || j.status === "queued";
+    const barClass = j.status === "done" ? "done" : (j.status === "error" ? "error" : "");
+    const facts = [j.stage, j.size, j.speed, j.eta && `ETA ${j.eta}`].filter(Boolean).map(esc).join("  ·  ");
+    return `<div class="job">
+      <div class="job-top">
+        <span class="job-title">${esc(j.title || j.url)}</span>
+        <span class="tag">${esc(j.label)}</span>
+        <span class="tag ${j.status}">${esc(j.status)}</span>
+      </div>
+      <div class="bar ${barClass}"><div style="width:${j.status === "done" ? 100 : j.percent}%"></div></div>
+      <div class="job-foot">
+        <span>${facts}</span>
+        <span class="spacer"></span>
+        ${j.status === "done" && j.filename
+            ? `<a href="/api/file/${j.id}" download>Save a copy</a>` : ""}
+        ${live ? `<button class="ghost tiny" onclick="cancelJob('${j.id}')">Cancel</button>` : ""}
+      </div>
+      ${j.error ? `<div class="err">${esc(j.error)}</div>` : ""}
+    </div>`;
+  }).join("");
+}
+
+function cancelJob(id) { fetch("/api/cancel/" + id, { method: "POST" }); }
+
+const es = new EventSource("/api/stream");
+es.onmessage = (e) => render(JSON.parse(e.data));
+</script>
+</body>
+</html>
