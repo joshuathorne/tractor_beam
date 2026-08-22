@@ -1,4 +1,4 @@
-"""media-grab — a local, self-hosted replacement for paste-a-URL downloader sites.
+"""tractor-beam — a local, self-hosted replacement for paste-a-URL downloader sites.
 
 Engine is yt-dlp; ffmpeg does the muxing. Nothing leaves this machine except the
 request yt-dlp makes to the site you asked for.
@@ -22,20 +22,20 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Streamin
 from pydantic import BaseModel, field_validator
 
 HERE = Path(__file__).resolve().parent
-MAX_CONCURRENT = int(os.environ.get("MEDIA_GRAB_JOBS", "3"))
+MAX_CONCURRENT = int(os.environ.get("TRACTOR_BEAM_JOBS", "3"))
 
 
 def default_output_dir() -> Path:
     """Land files outside the WSL VHDX by default so the virtual disk never swells."""
-    if env := os.environ.get("MEDIA_GRAB_OUT"):
+    if env := os.environ.get("TRACTOR_BEAM_OUT"):
         return Path(env)
     skip = {"public", "default", "default user", "all users"}
     for downloads in sorted(Path("/mnt/c/Users").glob("*/Downloads")):
         if downloads.parent.name.lower() in skip:
             continue
         if downloads.is_dir() and os.access(downloads, os.W_OK):
-            return downloads / "media-grab"
-    return Path.home() / "Downloads" / "media-grab"
+            return downloads / "tractor_beam"
+    return Path.home() / "Downloads" / "tractor_beam"
 
 
 OUT_DIR = default_output_dir()
@@ -208,7 +208,7 @@ def run_job(job_id: str, quality: str, audio_format: str) -> None:
 # ---------------------------------------------------------------- api
 
 
-app = FastAPI(title="media-grab", docs_url=None, redoc_url=None)
+app = FastAPI(title="tractor-beam", docs_url=None, redoc_url=None)
 
 
 class UrlPayload(BaseModel):

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>media-grab</title>
+<title>Tractor Beam</title>
 <style>
   :root {
     --bg:#0e1116; --panel:#161b22; --panel-2:#1c232d; --line:#2b3441;
@@ -130,7 +130,7 @@ let mode = "video", info = null;
 
 fetch("/api/config").then(r => r.json()).then(c => {
   $("#outdir").textContent = c.output_dir;
-  document.title = "media-grab";
+  document.title = "tractor-beam";
 });
 
 function dur(s) {

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start media-grab. Usage: ./run.sh [--lan] [port]
+# Start tractor_beam. Usage: ./run.sh [--lan] [port]
 set -euo pipefail
 cd "$(dirname "$0")"
 
