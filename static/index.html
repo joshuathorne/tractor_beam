@@ -11,6 +11,7 @@
     --warn:#d29922; --err:#f85149; --radius:10px;
   }
   * { box-sizing:border-box; }
+  [hidden] { display:none !important; }
   body {
     margin:0; background:var(--bg); color:var(--fg);
     font:15px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
@@ -28,7 +29,9 @@
     border-radius:8px; padding:11px 12px; font:inherit; outline:none;
   }
   input[type=url] { flex:1; min-width:0; }
-  input[type=url]:focus, select:focus { border-color:var(--accent); }
+  input[type=url]:focus, select:focus,
+  .sites input[type=search]:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(74,158,255,.14); }
+  ::placeholder { color:var(--dim); opacity:1; }
   button {
     background:var(--accent); color:#07121f; border:0; border-radius:8px;
     padding:11px 18px; font:600 15px/1 inherit; cursor:pointer; white-space:nowrap;
@@ -68,6 +71,24 @@
   .err { color:var(--err); font-size:12.5px; margin-top:8px; white-space:pre-wrap; word-break:break-word;
          background:#1d1315; border:1px solid #3a1618; border-radius:6px; padding:8px 10px; }
   a { color:var(--accent); }
+  .cookiebar { display:flex; align-items:center; gap:9px; margin-top:12px; color:var(--dim); font-size:12.5px; }
+  .cookiebar select { padding:6px 9px; font-size:12.5px; }
+  .sites { margin-top:26px; border-top:1px solid var(--line); padding-top:14px; color:var(--dim); font-size:13px; }
+  .sites summary { cursor:pointer; user-select:none; }
+  .sites input[type=search] {
+    width:100%; margin-top:12px; padding:9px 12px; border-radius:8px;
+    background:var(--panel-2); color:var(--fg); border:1px solid var(--line); font:inherit; font-size:13px;
+  }
+  .sitelist {
+    max-height:270px; overflow-y:auto; margin-top:10px; display:grid; gap:3px 16px;
+    grid-template-columns:repeat(auto-fill, minmax(190px, 1fr)); font-size:12.5px;
+  }
+  .sitelist a, .sitelist span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .sitelist a { color:var(--dim); text-decoration:none; }
+  .sitelist a:hover, .sitelist a:focus { color:var(--accent); text-decoration:underline; }
+  .sitelist .broken { opacity:.4; }
+  .sitefoot { margin-top:9px; font-size:12px; }
+  code.linky { color:var(--accent); text-decoration:underline; cursor:pointer; }
   .empty { color:var(--dim); font-size:13.5px; text-align:center; padding:26px 0; }
   .jobs-head { display:flex; align-items:center; margin:24px 0 11px; }
   .jobs-head h3 { font-size:13px; text-transform:uppercase; letter-spacing:.07em; color:var(--dim); margin:0; }
@@ -79,7 +100,7 @@
 </head>
 <body>
 <main>
-  <h1>media<span>-</span>grab</h1>
+  <h1>Tractor Beam  </h1>
   <p class="sub">Local downloader. Saves to <code id="outdir">…</code></p>
 
   <div class="card">
@@ -87,6 +108,11 @@
       <input type="url" id="url" placeholder="Paste a video or audio URL…" autocomplete="off" required>
       <button type="submit" id="inspect">Inspect</button>
     </form>
+
+    <div class="cookiebar" id="cookiebar" hidden>
+      <label for="cookies">Sign in as</label>
+      <select id="cookies"><option value="">No cookies</option></select>
+    </div>
 
     <div class="meta" id="meta" hidden>
       <img id="thumb" alt="">
@@ -122,16 +148,57 @@
     <button class="ghost tiny" id="clear">Clear finished</button>
   </div>
   <div id="jobs"><p class="empty">Nothing queued yet.</p></div>
+  <details class="sites" id="sites" open>
+    <summary id="sitesummary">Supported sites</summary>
+    <input type="search" id="sitefilter" placeholder="Filter sites…" autocomplete="off">
+    <div class="sitelist" id="sitelist"></div>
+    <p class="sitefoot" id="sitefoot"></p>
+  </details>
 </main>
 
 <script>
 const $ = (s) => document.querySelector(s);
-let mode = "video", info = null;
+let mode = "video", info = null, effectiveCookies = "";
+
+// A file browser can only pop open where the server runs, so a phone on the LAN
+// keeps the download link instead.
+let canReveal = false;
+const isLocal = ["127.0.0.1", "localhost", "::1", "[::1]"].includes(location.hostname);
 
 fetch("/api/config").then(r => r.json()).then(c => {
   $("#outdir").textContent = c.output_dir;
   document.title = "tractor-beam";
+  canReveal = c.can_reveal;
+  const browsers = c.browsers || [];
+  if (browsers.length) {
+    const sel = $("#cookies");
+    sel.innerHTML = '<option value="">No cookies</option>' +
+      browsers.map(b => `<option value="${esc(b.id)}">${esc(b.label)}</option>`).join("");
+    const saved = localStorage.getItem("tb-cookies") || "";
+    if (browsers.some(b => b.id === saved)) sel.value = saved;
+    sel.addEventListener("change", () => localStorage.setItem("tb-cookies", sel.value));
+    $("#cookiebar").hidden = false;
+  }
+  if (canReveal && isLocal) {
+    const el = $("#outdir");
+    el.classList.add("linky");
+    el.title = "Open this folder";
+    el.tabIndex = 0;
+    el.setAttribute("role", "button");
+    el.addEventListener("click", () => postReveal("/api/reveal"));
+    el.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") postReveal("/api/reveal"); });
+  }
 });
+
+async function postReveal(url) {
+  const res = await fetch(url, { method: "POST" });
+  if (!res.ok) {
+    const d = await res.json().catch(() => ({}));
+    showErr(d.error || "Could not open the file browser");
+  }
+}
+
+function cookieChoice() { return $("#cookies").value || ""; }
 
 function dur(s) {
   if (!s) return "";
@@ -157,14 +224,18 @@ $("#form").addEventListener("submit", async (ev) => {
     const res = await fetch("/api/inspect", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url })
+      body: JSON.stringify({ url, cookies: cookieChoice() })
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || data.detail?.[0]?.msg || "Could not read that URL");
     info = data;
     $("#mtitle").textContent = data.title || "(untitled)";
-    $("#msub").textContent = [data.uploader, dur(data.duration), data.extractor]
-      .filter(Boolean).join("  ·  ");
+    // Inspect already found out whether the cookies are usable; the download reuses its verdict.
+    effectiveCookies = data.cookies_used || "";
+    $("#msub").textContent = [
+      data.uploader, dur(data.duration), data.extractor,
+      data.cookies_dropped ? "cookies rejected — reading without them" : ""
+    ].filter(Boolean).join("  ·  ");
     const t = $("#thumb");
     if (data.thumbnail) { t.src = data.thumbnail; t.hidden = false; } else { t.hidden = true; }
     const q = $("#quality");
@@ -196,6 +267,7 @@ $("#grab").addEventListener("click", async () => {
   showErr("");
   const body = {
     url: $("#url").value.trim(),
+    cookies: effectiveCookies,
     mode,
     quality: $("#quality").value || "best",
     audio_format: $("#afmt").value
@@ -235,8 +307,7 @@ function render(jobs) {
       <div class="job-foot">
         <span>${facts}</span>
         <span class="spacer"></span>
-        ${j.status === "done" && j.filename
-            ? `<a href="/api/file/${j.id}" download>Save a copy</a>` : ""}
+        ${j.status === "done" && j.filename ? fileAction(j) : ""}
         ${live ? `<button class="ghost tiny" onclick="cancelJob('${j.id}')">Cancel</button>` : ""}
       </div>
       ${j.error ? `<div class="err">${esc(j.error)}</div>` : ""}
@@ -244,7 +315,49 @@ function render(jobs) {
   }).join("");
 }
 
+function fileAction(j) {
+  return canReveal && isLocal
+    ? `<a href="#" onclick="postReveal('/api/reveal/${j.id}');return false">Show in folder</a>`
+    : `<a href="/api/file/${j.id}" download>Save a copy</a>`;
+}
+
 function cancelJob(id) { fetch("/api/cancel/" + id, { method: "POST" }); }
+
+let sites = null;
+
+// The panel starts open, so a toggle listener would never fire.
+loadSites();
+
+async function loadSites() {
+  $("#sitefoot").textContent = "Loading…";
+  const res = await fetch("/api/extractors");
+  sites = (await res.json()).sites;
+  $("#sitesummary").textContent = `Supported sites (${sites.length})`;
+  $("#sitefilter").placeholder = `Filter ${sites.length} sites…`;
+  drawSites();
+}
+
+$("#sitefilter").addEventListener("input", drawSites);
+
+function siteTag(s) {
+  const cls = s.ok ? "" : "broken";
+  const tip = [s.desc, s.url && new URL(s.url).host, s.ok ? "" : "marked broken upstream"]
+    .filter(Boolean).join(" · ");
+  const label = esc(s.name);
+  return s.url
+    ? `<a class="${cls}" href="${esc(s.url)}" target="_blank" rel="noopener noreferrer" title="${esc(tip)}">${label}</a>`
+    : `<span class="${cls}" title="${esc(tip)}">${label}</span>`;
+}
+
+function drawSites() {
+  if (!sites) return;
+  const q = $("#sitefilter").value.trim().toLowerCase();
+  const hits = q ? sites.filter(s => s.name.toLowerCase().includes(q)) : sites;
+  $("#sitelist").innerHTML = hits.map(siteTag).join("");
+  $("#sitefoot").textContent = !hits.length ? `Nothing matches "${q}".`
+    : q ? `${hits.length} match${hits.length === 1 ? "" : "es"}.`
+        : `${hits.length} sites.`;
+}
 
 const es = new EventSource("/api/stream");
 es.onmessage = (e) => render(JSON.parse(e.data));

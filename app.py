@@ -10,6 +10,8 @@ import asyncio
 import json
 import os
 import re
+import shutil
+import subprocess
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
@@ -17,7 +19,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import yt_dlp
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, field_validator
 
@@ -40,6 +42,90 @@ def default_output_dir() -> Path:
 
 OUT_DIR = default_output_dir()
 OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def find_file_manager() -> str | None:
+    """Whichever file manager this host offers. explorer.exe first: under WSL both exist."""
+    for cmd in ("explorer.exe", "xdg-open", "open"):
+        if shutil.which(cmd):
+            return cmd
+    return None
+
+
+FILE_MANAGER = find_file_manager()
+
+
+def has_cookie_db(browser: str, profile: Path) -> bool:
+    """Firefox keeps one file; chromium-family hides it a level or two down."""
+    if browser == "firefox":
+        return (profile / "cookies.sqlite").is_file()
+    return any((profile / rel).is_file() for rel in ("Default/Cookies", "Default/Network/Cookies"))
+
+
+def find_cookie_sources() -> dict[str, dict]:
+    """Browser profiles this host can read. Under WSL the Windows ones show up through /mnt/c.
+
+    Chromium-family profiles on the Windows side are deliberately left out: their
+    cookies are sealed with DPAPI, which cannot be unlocked from inside WSL.
+    """
+    found: list[tuple[str, str, str]] = []
+
+    for base in (Path.home() / ".mozilla/firefox",
+                 Path.home() / "snap/firefox/common/.mozilla/firefox"):
+        if base.is_dir():
+            for prof in sorted(base.glob("*.default*")):
+                if has_cookie_db("firefox", prof):
+                    found.append(("firefox", f"Firefox · {prof.name.split('.', 1)[-1]}", str(prof)))
+
+    for prof in sorted(Path("/mnt/c/Users").glob("*/AppData/Roaming/Mozilla/Firefox/Profiles/*.default*")):
+        if has_cookie_db("firefox", prof):
+            found.append(("firefox", f"Firefox · {prof.name.split('.', 1)[-1]} (Windows)", str(prof)))
+
+    for browser, rel in (("chrome", ".config/google-chrome"),
+                         ("chromium", ".config/chromium"),
+                         ("brave", ".config/BraveSoftware/Brave-Browser"),
+                         ("edge", ".config/microsoft-edge"),
+                         ("vivaldi", ".config/vivaldi"),
+                         ("opera", ".config/opera")):
+        if (d := Path.home() / rel).is_dir() and has_cookie_db(browser, d):
+            found.append((browser, browser.capitalize(), str(d)))
+
+    return {
+        f"{browser}-{i}": {"browser": browser, "label": label, "profile": profile}
+        for i, (browser, label, profile) in enumerate(found)
+    }
+
+
+COOKIE_SOURCES = find_cookie_sources()
+
+# Cloudflare turns away yt-dlp's stock TLS fingerprint with a 403. curl_cffi makes
+# the generic extractor's requests look like a real browser's instead.
+IMPERSONATE_ARGS = {"generic": {"impersonate": [""]}}
+
+
+def cookie_opts(key: str) -> dict:
+    """yt-dlp options for one detected profile. Unknown keys mean no cookies, never a guess."""
+    src = COOKIE_SOURCES.get(key)
+    if not src:
+        return {}
+    return {"cookiesfrombrowser": (src["browser"], src["profile"] or None, None, None)}
+
+
+def open_in_file_manager(path: Path) -> None:
+    """Pop the host's file browser open on `path`, selecting it when it is a file."""
+    if FILE_MANAGER == "explorer.exe":
+        win = subprocess.run(
+            ["wslpath", "-w", str(path)], capture_output=True, text=True, check=False
+        ).stdout.strip()
+        if not win:
+            return
+        args = ["explorer.exe", f"/select,{win}"] if path.is_file() else ["explorer.exe", win]
+    elif FILE_MANAGER == "open":
+        args = ["open", "-R", str(path)] if path.is_file() else ["open", str(path)]
+    else:
+        args = ["xdg-open", str(path if path.is_dir() else path.parent)]
+    # explorer.exe exits 1 even on success, so there is no status worth waiting for.
+    subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 # ---------------------------------------------------------------- job state
@@ -69,11 +155,16 @@ class Job:
 
 
 JOBS: dict[str, Job] = {}
+EXTRACTOR_CACHE: list[dict] | None = None
 EXECUTOR = ThreadPoolExecutor(max_workers=MAX_CONCURRENT, thread_name_prefix="grab")
 
 
 class Cancelled(Exception):
     """Raised out of a progress hook to abort a running download."""
+
+
+def clean_error(exc: Exception) -> str:
+    return re.sub(r"\x1b\[[0-9;]*m", "", str(exc)).strip()
 
 
 def human_bytes(n: float | None) -> str:
@@ -100,7 +191,7 @@ def human_eta(seconds: float | None) -> str:
 # ---------------------------------------------------------------- yt-dlp glue
 
 
-def build_opts(job: Job, quality: str, audio_format: str) -> dict:
+def build_opts(job: Job, quality: str, audio_format: str, cookies: str = "") -> dict:
     def progress_hook(d: dict) -> None:
         if job.cancel:
             raise Cancelled()
@@ -143,6 +234,8 @@ def build_opts(job: Job, quality: str, audio_format: str) -> dict:
         "continuedl": True,
         "overwrites": False,
         "postprocessors": [],
+        "extractor_args": IMPERSONATE_ARGS,
+        **cookie_opts(cookies),
     }
 
     if job.mode == "audio":
@@ -176,12 +269,12 @@ def build_opts(job: Job, quality: str, audio_format: str) -> dict:
     return opts
 
 
-def run_job(job_id: str, quality: str, audio_format: str) -> None:
+def run_job(job_id: str, quality: str, audio_format: str, cookies: str = "") -> None:
     job = JOBS[job_id]
     job.status = "running"
     job.stage = "resolving"
     try:
-        with yt_dlp.YoutubeDL(build_opts(job, quality, audio_format)) as ydl:
+        with yt_dlp.YoutubeDL(build_opts(job, quality, audio_format, cookies)) as ydl:
             info = ydl.extract_info(job.url, download=True)
             job.title = info.get("title") or job.title
             requested = info.get("requested_downloads") or []
@@ -198,7 +291,7 @@ def run_job(job_id: str, quality: str, audio_format: str) -> None:
     except yt_dlp.utils.DownloadError as exc:
         job.status = "error"
         job.stage = ""
-        job.error = re.sub(r"\x1b\[[0-9;]*m", "", str(exc)).strip()
+        job.error = clean_error(exc)
     except Exception as exc:  # surfaced to the UI, never swallowed
         job.status = "error"
         job.stage = ""
@@ -213,6 +306,7 @@ app = FastAPI(title="tractor-beam", docs_url=None, redoc_url=None)
 
 class UrlPayload(BaseModel):
     url: str
+    cookies: str = ""
 
     @field_validator("url")
     @classmethod
@@ -220,6 +314,14 @@ class UrlPayload(BaseModel):
         v = v.strip()
         if urlparse(v).scheme not in {"http", "https"}:
             raise ValueError("URL must start with http:// or https://")
+        return v
+
+    @field_validator("cookies")
+    @classmethod
+    def known_source(cls, v: str) -> str:
+        """Only ids this server itself advertised, so no caller can name an arbitrary path."""
+        if v and v not in COOKIE_SOURCES:
+            raise ValueError("unknown cookie source")
         return v
 
 
@@ -250,21 +352,68 @@ async def index() -> HTMLResponse:
 
 @app.get("/api/config")
 async def config() -> dict:
-    return {"output_dir": str(OUT_DIR), "yt_dlp": yt_dlp.version.__version__}
+    return {
+        "output_dir": str(OUT_DIR),
+        "yt_dlp": yt_dlp.version.__version__,
+        "can_reveal": FILE_MANAGER is not None,
+        "browsers": [{"id": k, "label": v["label"]} for k, v in COOKIE_SOURCES.items()],
+    }
+
+
+def site_home(ie) -> str:
+    """Extractor names say little, but their own test URLs name the site they belong to."""
+    tests = list(getattr(ie, "_TESTS", None) or [])
+    if (single := getattr(ie, "_TEST", None)):
+        tests.append(single)
+    for t in tests:
+        if isinstance(t, dict) and (url := t.get("url")):
+            if netloc := urlparse(url).netloc:
+                return f"https://{netloc}/"
+    return ""
+
+
+@app.get("/api/extractors")
+async def extractors() -> dict:
+    """Built on first request: reading _TESTS pulls in every extractor module."""
+    global EXTRACTOR_CACHE
+    if EXTRACTOR_CACHE is None:
+        from yt_dlp.extractor import gen_extractor_classes
+
+        EXTRACTOR_CACHE = sorted(
+            ({"name": ie.IE_NAME,
+              "ok": ie.working(),
+              "url": site_home(ie),
+              "desc": ie.IE_DESC if isinstance(ie.IE_DESC, str) else ""}
+             for ie in gen_extractor_classes()
+             if ie.IE_NAME and ie.IE_NAME.lower() != "generic"),
+            key=lambda e: e["name"].lower(),
+        )
+    return {"sites": EXTRACTOR_CACHE}
 
 
 @app.post("/api/inspect")
 async def inspect(payload: UrlPayload):
-    def probe() -> dict:
-        opts = {"quiet": True, "no_warnings": True, "noplaylist": True, "skip_download": True}
+    def probe(cookies: str) -> dict:
+        opts = {"quiet": True, "no_warnings": True, "noplaylist": True, "skip_download": True,
+                "extractor_args": IMPERSONATE_ARGS, **cookie_opts(cookies)}
         with yt_dlp.YoutubeDL(opts) as ydl:
             return ydl.extract_info(payload.url, download=False)
 
+    loop = asyncio.get_running_loop()
+    used = payload.cookies
     try:
-        info = await asyncio.get_running_loop().run_in_executor(EXECUTOR, probe)
+        info = await loop.run_in_executor(EXECUTOR, probe, payload.cookies)
     except yt_dlp.utils.DownloadError as exc:
-        msg = re.sub(r"\x1b\[[0-9;]*m", "", str(exc)).strip()
-        return JSONResponse({"error": msg}, status_code=422)
+        # A borrowed session can make a public URL fail that works fine anonymously —
+        # YouTube in particular rejects rotated cookies. Worth one plain retry.
+        first = clean_error(exc)
+        if not payload.cookies:
+            return JSONResponse({"error": first}, status_code=422)
+        try:
+            info = await loop.run_in_executor(EXECUTOR, probe, "")
+            used = ""
+        except yt_dlp.utils.DownloadError:
+            return JSONResponse({"error": first}, status_code=422)
 
     heights = sorted(
         {f["height"] for f in (info.get("formats") or []) if f.get("height")},
@@ -277,6 +426,8 @@ async def inspect(payload: UrlPayload):
         "thumbnail": info.get("thumbnail") or "",
         "extractor": info.get("extractor_key") or "",
         "heights": heights,
+        "cookies_used": used,
+        "cookies_dropped": bool(payload.cookies) and not used,
     }
 
 
@@ -290,7 +441,7 @@ async def grab(payload: GrabPayload) -> dict:
     )
     JOBS[job.id] = job
     asyncio.get_running_loop().run_in_executor(
-        EXECUTOR, run_job, job.id, payload.quality, payload.audio_format
+        EXECUTOR, run_job, job.id, payload.quality, payload.audio_format, payload.cookies
     )
     return job.public()
 
@@ -319,6 +470,33 @@ async def file(job_id: str):
     if not path.is_file() or OUT_DIR.resolve() not in path.parents:
         return JSONResponse({"error": "not found"}, status_code=404)
     return FileResponse(path, filename=path.name)
+
+
+def reveal_response(request: Request, path: Path):
+    """Opening a window only helps whoever is sitting at this machine, so keep it local."""
+    if not request.client or request.client.host not in {"127.0.0.1", "::1"}:
+        return JSONResponse({"error": "Only available on the machine running tractor beam"}, status_code=403)
+    if not FILE_MANAGER:
+        return JSONResponse({"error": "No file manager found on this host"}, status_code=501)
+    open_in_file_manager(path)
+    return {"ok": True}
+
+
+@app.post("/api/reveal")
+async def reveal_dir(request: Request):
+    return reveal_response(request, OUT_DIR)
+
+
+@app.post("/api/reveal/{job_id}")
+async def reveal_job(job_id: str, request: Request):
+    """Falls back to the output directory when the file has been moved or renamed since."""
+    job = JOBS.get(job_id)
+    target = OUT_DIR
+    if job and job.filename:
+        path = (OUT_DIR / job.filename).resolve()
+        if path.is_file() and OUT_DIR.resolve() in path.parents:
+            target = path
+    return reveal_response(request, target)
 
 
 @app.get("/api/stream")
