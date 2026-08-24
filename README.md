@@ -20,9 +20,7 @@ run.cmd --lan 9000
 ```
 
 Both launchers build `.venv` on first run. Windows additionally needs `ffmpeg.exe`
-on PATH (`winget install Gyan.FFmpeg`) — the page warns if it is missing. Running
-natively is worth it for large files: downloads no longer cross WSL's `/mnt/c`
-bridge, and Chrome/Edge cookies become readable because DPAPI unseals normally.
+on PATH (`winget install Gyan.FFmpeg`) — the page warns if it is missing.
 
 ## Output
 
@@ -34,11 +32,10 @@ TRACTOR_BEAM_OUT=/mnt/f/media ./run.sh
 
 ## Sites that need a login
 
-Some sites only serve the good formats to a signed-in session. If a browser profile
-is detected on this machine, a **Sign in as** picker appears above Inspect and yt-dlp
+If a browser profile is detected on this machine, a **Sign in as** picker appears above Inspect and yt-dlp
 reuses that browser's cookies — no passwords, no separate login.
 
-Firefox is the one that works under WSL: its `cookies.sqlite` is readable from Linux.
+Firefox works under WSL: its `cookies.sqlite` is readable from Linux.
 Chrome/Edge profiles on the Windows side are skipped on purpose, because their cookies
 are sealed with Windows DPAPI and cannot be unlocked from inside WSL. Chromium-family
 profiles installed *in* Linux are offered normally.
